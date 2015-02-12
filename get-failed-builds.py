@@ -35,7 +35,7 @@ for build in builds:
 	if not failed_packages.get(current_package, False):
 		failed_packages[current_package] = 1
 #        print("Checking package: %s" % (build['nvr']))
-		package_builds = session.listTagged(tag, package=build['package_name'])
+		package_builds = session.listTagged(tag, package=build['package_name'], latest=True)
 
 		newer_exists = False
 		for package in package_builds:
