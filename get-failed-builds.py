@@ -32,16 +32,20 @@ for build in builds:
 	# check for newer
 	tag=build['release'].split('.')[-1].replace('c','')
 	current_package = "{package_name}-{tag}".format(package_name=build['package_name'], tag=tag)
+
 	if not failed_packages.get(current_package, False):
 		failed_packages[current_package] = 1
 #        print("Checking package: %s" % (build['nvr']))
-		package_builds = session.listTagged(tag, package=build['package_name'], latest=True)
-
 		newer_exists = False
-		for package in package_builds:
-#            print("\tfound version %s" % package['nvr'])
-			if 1 == rpm.labelCompare(('1', package['version'], package['release']), ('1', build['version'], build['release'])):
-				newer_exists = True
+		try:
+			package_builds = session.listTagged(tag, package=build['package_name'], latest=True)
+
+			for package in package_builds:
+#                print("\tfound version %s" % package['nvr'])
+				if 1 == rpm.labelCompare(('1', package['version'], package['release']), ('1', build['version'], build['release'])):
+					newer_exists = True
+		except:
+			pass	# no idea why koji fails for listTagged() on packages which never built
 
 		if not newer_exists:
 			task1 = session.listTasks(opts={'parent':build['task_id']})
