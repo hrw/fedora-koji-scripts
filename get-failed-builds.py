@@ -20,14 +20,13 @@ failed_packages = {}
 
 for build in builds:
 	# check for newer
-	tag = build['release'].split('.')[-1].replace('c','')
-
-	if not "%s-%s" % (build['package_name'], tag) in failed_packages:
-		failed_packages["%s-%s" % (build['package_name'], tag)] = 1
+	tag=build['release'].split('.')[-1].replace('c','')
+	current_package = "{package_name}-{tag}".format(package_name=build['package_name'], tag=tag)
+	if not failed_packages.get(current_package, False):
+		failed_packages[current_package] = 1
 #        print("Checking package: %s" % (build['nvr']))
 		package_builds = session.listTagged(tag, package=build['package_name'])
 
-		
 		newer_exists = False
 		for package in package_builds:
 #            print("\tfound version %s" % package['nvr'])
