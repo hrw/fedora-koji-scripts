@@ -16,13 +16,29 @@ OptionParser = optparse.OptionParser
 
 parser = OptionParser()
 parser.disable_interspersed_args()
-parser.add_option("-s", "--server", dest="server", default='http://arm.koji.fedoraproject.org',
-					help="Koji server to use (defaults to aarch64 koji)")
+parser.add_option("-a", "--arch", dest="arch",
+					help="specify architecture to use (defaults to primary koji)")
 parser.add_option("-l", "--limit", default=50, dest="limit", type="int",
 					help="specify an amount of packages to fetch (may display less due to repeats)")
 (options, args) = parser.parse_args()
 
-session = koji.ClientSession(options.server + '/kojihub')
+if options.arch == 'aoptions.arch64':
+	options.arch = 'arm'
+elif options.arch == 'ppc64':
+	options.arch = 'ppc'
+elif options.arch == 's390x':
+	options.arch = 's390'
+elif options.arch in ['arm', 'i386', 'x86_64']:
+	options.arch = ''
+
+if options.arch:
+	options.arch += '.'
+else:
+	options.arch = ''
+
+server = "http://" + str(options.arch) + "koji.fedoraproject.org/"
+
+session = koji.ClientSession(server + '/kojihub')
 
 builds = session.listBuilds(state=koji.BUILD_STATES['FAILED'], queryOpts={'limit':options.limit, 'order':'-build_id'})
 
@@ -49,7 +65,7 @@ for build in builds:
 
 		if not newer_exists:
 			task1 = session.listTasks(opts={'parent':build['task_id']})
-			print("Failed package: %s %s/koji/taskinfo?taskID=%d" % (build['nvr'], options.server, task1[0]['id']))
+			print("Failed package: %s %s/koji/taskinfo?taskID=%d" % (build['nvr'], server, task1[0]['id']))
 
 """
 Build:
