@@ -7,20 +7,18 @@ Author: Marcin Juszkiewicz <mjuszkiewicz@redhat.com>
 License: GPLv2+
 """
 
+import argparse
 import koji
-import optparse
 import rpm
 
 
-OptionParser = optparse.OptionParser
 
-parser = OptionParser()
-parser.disable_interspersed_args()
-parser.add_option("-a", "--arch", dest="arch",
+parser = argparse.ArgumentParser(description="Query Koji for FTBFS list")
+parser.add_argument("-a", "--arch", dest="arch",
 					help="specify architecture to use (defaults to primary koji)")
-parser.add_option("-l", "--limit", default=50, dest="limit", type="int",
+parser.add_argument("-l", "--limit", default=50, dest="limit", type=int,
 					help="specify an amount of packages to fetch (may display less due to repeats)")
-(options, args) = parser.parse_args()
+options = parser.parse_args()
 
 if options.arch == 'aoptions.arch64':
 	options.arch = 'arm'
