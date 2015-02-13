@@ -11,35 +11,38 @@ import argparse
 import koji
 import rpm
 
+def parse_args():
+	parser = argparse.ArgumentParser(description="Query Koji for FTBFS list")
+	parser.add_argument("-a", "--arch", dest="arch",
+						help="specify architecture to use (defaults to primary koji)")
+	parser.add_argument("-l", "--limit", default=50, dest="limit", type=int,
+						help="specify an amount of packages to fetch (may display less due to repeats)")
+	options = parser.parse_args()
+
+	if options.arch == 'aarch64':
+		options.arch = 'arm'
+	elif options.arch == 'ppc64':
+		options.arch = 'ppc'
+	elif options.arch == 's390x':
+		options.arch = 's390'
+	elif options.arch in ['arm', 'i386', 'x86_64']:
+		options.arch = ''
+
+	if options.arch:
+		options.arch += '.'
+	else:
+		options.arch = ''
+
+	server = "http://" + str(options.arch) + "koji.fedoraproject.org/"
+
+	return (server, options.limit)
 
 
-parser = argparse.ArgumentParser(description="Query Koji for FTBFS list")
-parser.add_argument("-a", "--arch", dest="arch",
-					help="specify architecture to use (defaults to primary koji)")
-parser.add_argument("-l", "--limit", default=50, dest="limit", type=int,
-					help="specify an amount of packages to fetch (may display less due to repeats)")
-options = parser.parse_args()
+def list_ftbfs(server, limit):
 
-if options.arch == 'aarch64':
-	options.arch = 'arm'
-elif options.arch == 'ppc64':
-	options.arch = 'ppc'
-elif options.arch == 's390x':
-	options.arch = 's390'
-elif options.arch in ['arm', 'i386', 'x86_64']:
-	options.arch = ''
-
-if options.arch:
-	options.arch += '.'
-else:
-	options.arch = ''
-
-server = "http://" + str(options.arch) + "koji.fedoraproject.org/"
-
-try:
 	session = koji.ClientSession(server + '/kojihub')
 
-	builds = session.listBuilds(state=koji.BUILD_STATES['FAILED'], queryOpts={'limit':options.limit, 'order':'-build_id'})
+	builds = session.listBuilds(state=koji.BUILD_STATES['FAILED'], queryOpts={'limit':limit, 'order':'-build_id'})
 
 	failed_packages = {}
 
@@ -65,6 +68,12 @@ try:
 			if not newer_exists:
 				task1 = session.listTasks(opts={'parent':build['task_id']})
 				print("Failed package: %s %s/koji/taskinfo?taskID=%d" % (build['nvr'], server, task1[0]['id']))
+
+
+try:
+	(server, limit) = parse_args()
+	list_ftbfs(server, limit)
+
 except KeyboardInterrupt:
 	print("\n")
 	exit
