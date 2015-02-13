@@ -20,7 +20,7 @@ parser.add_argument("-l", "--limit", default=50, dest="limit", type=int,
 					help="specify an amount of packages to fetch (may display less due to repeats)")
 options = parser.parse_args()
 
-if options.arch == 'aoptions.arch64':
+if options.arch == 'aarch64':
 	options.arch = 'arm'
 elif options.arch == 'ppc64':
 	options.arch = 'ppc'
