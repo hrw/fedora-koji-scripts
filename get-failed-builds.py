@@ -62,7 +62,7 @@ def list_ftbfs(server, limit):
 	#                print("\tfound version %s" % package['nvr'])
 					if 1 == rpm.labelCompare(('1', package['version'], package['release']), ('1', build['version'], build['release'])):
 						newer_exists = True
-			except Exception:
+			except koji.GenericError:
 				pass	# no idea why koji fails for listTagged() on packages which never built
 
 			if not newer_exists:
