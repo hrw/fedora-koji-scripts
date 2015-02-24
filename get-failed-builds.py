@@ -9,6 +9,7 @@ License: GPLv2+
 
 import argparse
 import koji
+import re
 import rpm
 
 def parse_args():
@@ -67,7 +68,23 @@ def list_ftbfs(server, limit):
 
 			if not newer_exists:
 				task1 = session.listTasks(opts={'parent':build['task_id']})
-				print("Failed package: %s %s/koji/taskinfo?taskID=%d" % (build['nvr'], server, task1[0]['id']))
+
+				package_failed_reason = ''
+
+				errorlog = ''
+
+				if 'root.log' in session.listTaskOutput(task1[0]['id']):
+					rootlog = session.downloadTaskOutput(task1[0]['id'], 'root.log')
+
+					if 'Requires:' in rootlog:
+						package_failed_reason = ' (missing build dependencies)'
+
+						errorlog = re.sub("DEBUG util.py:...:", "", rootlog[rootlog.find('Error:'):rootlog.find('You could try')])
+
+				print("Package failed%s: %s %s/koji/taskinfo?taskID=%d" % (package_failed_reason, build['nvr'], server, task1[0]['id']))
+
+				if errorlog:
+					print(errorlog)
 
 
 try:
