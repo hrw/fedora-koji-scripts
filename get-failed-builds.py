@@ -9,8 +9,14 @@ License: GPLv2+
 
 import argparse
 import koji
+import json
 import re
 import rpm
+import sqlite3
+
+
+def jprint(sth):
+	print( json.dumps(sth, indent=4) )
 
 def parse_args():
 	parser = argparse.ArgumentParser(description="Query Koji for FTBFS list")
@@ -38,12 +44,27 @@ def parse_args():
 
 	return (server, options.limit)
 
+def get_list_of_failed_builds(server, limit):
+	return session.listBuilds(state=koji.BUILD_STATES['FAILED'], queryOpts={'limit':limit, 'order':'-build_id'})
+
+def add_build_to_db(build, tag, buildtask):
+	cur.execute("""
+				INSERT INTO nvrs
+				(build_id, package_name, nvr, arch, tag, owner_name, task_id, creation_time, epoch, version, release, state)
+				VALUES
+				(?,        ?,            ?,   ?,    ?,   ?,          ?,       ?,             ?,     ?,       ?,       ?)
+				""",
+				(
+					build['build_id'], build['package_name'], build['nvr'], buildtask['arch'], tag, buildtask['owner_name'],
+					buildtask['id'], buildtask['create_time'], build['epoch'], build['version'],
+					build['release'], buildtask['state']
+				)
+			   )
+	conn.commit()
 
 def list_ftbfs(server, limit):
 
-	session = koji.ClientSession(server + '/kojihub')
-
-	builds = session.listBuilds(state=koji.BUILD_STATES['FAILED'], queryOpts={'limit':limit, 'order':'-build_id'})
+	builds = get_list_of_failed_builds(server, limit)
 
 	failed_packages = {}
 
@@ -56,6 +77,7 @@ def list_ftbfs(server, limit):
 			failed_packages[current_package] = 1
 	#        print("Checking package: %s" % (build['nvr']))
 			newer_exists = False
+			
 			try:
 				package_builds = session.listTagged(tag, package=build['package_name'], latest=True)
 
@@ -67,21 +89,25 @@ def list_ftbfs(server, limit):
 				pass	# no idea why koji fails for listTagged() on packages which never built
 
 			if not newer_exists:
-				task1 = session.listTasks(opts={'parent':build['task_id']})
+				buildarch_tasks = session.listTasks(opts={'parent':build['task_id']})
+
+				for buildtask in buildarch_tasks:
+					if buildtask['method'] == 'buildArch':
+						add_build_to_db(build, tag, buildtask)
 
 				package_failed_reason = ''
 
 				errorlog = ''
 
-				if 'root.log' in session.listTaskOutput(task1[0]['id']):
-					rootlog = session.downloadTaskOutput(task1[0]['id'], 'root.log')
+#                if 'root.log' in session.listTaskOutput(buildarch_tasks[0]['id']):
+#                    rootlog = session.downloadTaskOutput(buildarch_tasks[0]['id'], 'root.log')
 
-					if 'Requires:' in rootlog:
-						package_failed_reason = ' (missing build dependencies)'
+#                    if 'Requires:' in rootlog:
+#                        package_failed_reason = ' (missing build dependencies)'
 
-						errorlog = re.sub("DEBUG util.py:...:", "", rootlog[rootlog.find('Error:'):rootlog.find('You could try')])
+#                        errorlog = re.sub("DEBUG util.py:...:", "", rootlog[rootlog.find('Error:'):rootlog.find('You could try')])
 
-				print("Package failed%s: %s %s/koji/taskinfo?taskID=%d" % (package_failed_reason, build['nvr'], server, task1[0]['id']))
+				print("Package failed%s: %s %s/koji/taskinfo?taskID=%d" % (package_failed_reason, build['nvr'], server, buildarch_tasks[0]['id']))
 
 				if errorlog:
 					print(errorlog)
@@ -89,8 +115,16 @@ def list_ftbfs(server, limit):
 
 try:
 	(server, limit) = parse_args()
+
+	session = koji.ClientSession(server + '/kojihub')
+
+	conn = sqlite3.connect('cache.db')
+	cur  = conn.cursor()
+
 	list_ftbfs(server, limit)
 
 except KeyboardInterrupt:
 	print("\n")
-	exit
+
+
+conn.close();
