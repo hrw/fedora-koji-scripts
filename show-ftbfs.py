@@ -6,10 +6,11 @@ conn = sqlite3.connect('cache.db')
 cur = conn.cursor()
 
 print("""
-<html>
+<!doctype html>
 <head>
 <title>Fedora FTBFS list</title>
-<style>
+<meta charset="UTF-8">
+<style type="text/css">
 body {
 	background-color:white;
 	text-color:black;
@@ -146,5 +147,5 @@ for package in cur.fetchall():
 	print('</tr>')
 
 
-print("</table>")
+print("</table></div>")
 print("</body></html>")
