@@ -18,7 +18,10 @@ table,td {
 	width: 100%;
 	border: black 1px solid;
 	padding: 3px;
-	font-size: 0.8 em;
+}
+
+td {
+	font-size: 0.6 em;
 }
 tr.odd {
 	background-color: lightgrey;
@@ -26,7 +29,10 @@ tr.odd {
 tr.even {
 	background-color: lightgreen;
 }
-
+a:link { text-decoration: none; }
+a:visited { text-decoration: none; } 
+a:hover { text-decoration: underline; } 
+a:active { text-decoration: underline; }
 </style>
 </head>
 <body>
