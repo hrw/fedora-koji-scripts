@@ -16,7 +16,6 @@ body {
 }
 table,td {
 	width: 100%;
-	border: black 1px solid;
 	padding: 0.2em;
 }
 
@@ -28,7 +27,17 @@ tr.odd {
 	background-color: lightgrey;
 }
 tr.even {
-	background-color: lightgreen;
+	background-color: lightblue;
+}
+
+.failed {
+    background-color: red;
+}
+.canceled {
+    background-color: orange;
+}
+.closed {
+    background-color: green;
 }
 
 a:link { text-decoration: none; }
@@ -78,6 +87,12 @@ kojis = {
 	}
 
 
+states = {
+		2: 'closed',
+		3: 'canceled',
+		5: 'failed'
+		}
+
 tag = ''
 a = 0.0
 
@@ -96,8 +111,8 @@ for package in cur.fetchall():
 		print("<th>noarch</th><th>armhfp</th><th>i386</th><th>x86_64</th><th>aarch64</th><th>ppc64</th><th>ppc64le</th><th>s390</th><th>s390x</th></tr>")
 
 	archs = {}
-	for arch in cur.execute("SELECT arch, task_id FROM nvrs WHERE package_name =  ?", [package[0]]):
-		archs[arch[0]] = arch[1]
+	for arch in cur.execute("SELECT arch, task_id, state FROM nvrs WHERE package_name =  ?", [package[0]]):
+		archs[arch[0]] = arch
 
 	if a%2:
 		print("<tr class='even'>")
@@ -109,11 +124,12 @@ for package in cur.fetchall():
 	print("<td>%s</td><td>%s</td>" % (package[0], package[2]))
 
 	for arch in ['noarch', 'armhfp', 'i386', 'x86_64', 'aarch64', 'ppc64', 'ppc64le', 's390', 's390x']:
-		print('<td>')
 
 		if arch in archs:
-			print("<a href='http://%s/koji/taskinfo?taskID=%d'>%s</a>" % (kojis[arch], archs[arch], arch))
+			print('<td class="%s">' % states[archs[arch][2]])
+			print("<a href='http://%s/koji/taskinfo?taskID=%d'>%s</a>" % (kojis[arch], archs[arch][1], arch))
 		else:
+			print('<td>')
 			print('&nbsp;')
 
 		print('</td>')
