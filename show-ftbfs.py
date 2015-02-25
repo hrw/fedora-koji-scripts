@@ -116,9 +116,13 @@ for package in cur.fetchall():
 
 		tag = package[1]
 		print("<div id='%s'><p>%s</p>" % (tag, tag))
-		print("<table>")
-		print("<tr><th>Name</th><th>nvr</th>")
-		print("<th>noarch</th><th>armhfp</th><th>i386</th><th>x86_64</th><th>aarch64</th><th>ppc64</th><th>ppc64le</th><th>s390</th><th>s390x</th></tr>")
+		print("""
+<table>
+	<tr>
+		<th>Name</th>
+		<th>nvr</th>
+		<th>noarch</th><th>armhfp</th><th>i386</th><th>x86_64</th><th>aarch64</th><th>ppc64</th><th>ppc64le</th><th>s390</th><th>s390x</th></tr>
+""")
 
 	archs = {}
 	for arch in cur.execute("SELECT arch, task_id, state FROM nvrs WHERE package_name =  ?", [package[0]]):
