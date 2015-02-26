@@ -104,9 +104,9 @@ kojis = {
 
 
 states = {
-		2: 'closed',
-		3: 'canceled',
-		5: 'failed'
+		2: ['OK','closed'  ],
+		3: ['C', 'canceled'],
+		5: ['F','failed'   ]
 		}
 
 tag = ''
@@ -146,8 +146,8 @@ for package in cur.fetchall():
 	for arch in ['noarch', 'armhfp', 'i386', 'x86_64', 'aarch64', 'ppc64', 'ppc64le', 's390', 's390x']:
 
 		if arch in archs:
-			print('<td class="%s">' % states[archs[arch][2]])
-			print("<a href='http://%s/koji/taskinfo?taskID=%d'>%s</a>" % (kojis[arch], archs[arch][1], arch))
+			print('<td class="%s">' % states[ archs[arch][2] ][1] )
+			print("<a href='http://%s/koji/taskinfo?taskID=%d'>%s (%s)</a>" % (kojis[arch], archs[arch][1], arch, states[ archs[arch][2]][0]   ))
 		else:
 			print('<td>')
 			print('&nbsp;')
