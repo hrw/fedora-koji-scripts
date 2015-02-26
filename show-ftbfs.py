@@ -21,7 +21,7 @@ table,td {
 }
 
 td {
-	font-size: 0.6 em;
+	font-size: 0.8em;
 }
 
 tr.odd {
@@ -39,6 +39,10 @@ tr.even {
 }
 .closed {
     background-color: green;
+}
+
+td>a {
+white-space: nowrap;
 }
 
 a:link { text-decoration: none; }
