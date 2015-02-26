@@ -32,13 +32,13 @@ tr.even {
 }
 
 .failed {
-    background-color: red;
+    background-color: #f44;
 }
 .canceled {
-    background-color: orange;
+    background-color: #ffa544;
 }
 .closed {
-    background-color: green;
+    background-color: #4f4;
 }
 
 td>a {
