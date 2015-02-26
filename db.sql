@@ -10,5 +10,6 @@ CREATE TABLE nvrs(
 	epoch          integer,
 	version        varchar,
 	release        varchar,
-	state          integer
+	state          integer,
+	rootlog        text
 );
