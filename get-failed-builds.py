@@ -94,20 +94,21 @@ def list_ftbfs(server, limit):
 				for buildtask in buildarch_tasks:
 					package_failed_reason = ''
 
-					errorlog = ''
+					if not cur.execute("SELECT nvr FROM nvrs WHERE build_id = ?", [build['build_id']]):
+						errorlog = ''
 
-					if 'root.log' in session.listTaskOutput( buildtask['id']):
-						rootlog = session.downloadTaskOutput(buildtask['id'], 'root.log')
+						if 'root.log' in session.listTaskOutput( buildtask['id']):
+							rootlog = session.downloadTaskOutput(buildtask['id'], 'root.log')
 
-						if 'Requires:' in rootlog:
-							package_failed_reason = ' (missing build dependencies)'
+							if 'Requires:' in rootlog:
+								package_failed_reason = ' (missing build dependencies)'
 
-							errorlog = re.sub("DEBUG util.py:...:", "", rootlog[rootlog.find('Error:'):rootlog.find('Child return code was')])
+								errorlog = re.sub("DEBUG util.py:...:", "", rootlog[rootlog.find('Error:'):rootlog.find('Child return code was')])
 
-					print("Package failed%s: %s %s/koji/taskinfo?taskID=%d" % (package_failed_reason, build['nvr'], server, buildtask['id']))
+						print("Package failed%s: %s %s/koji/taskinfo?taskID=%d" % (package_failed_reason, build['nvr'], server, buildtask['id']))
 
-					if buildtask['method'] == 'buildArch':
-						add_build_to_db(build, tag, buildtask, errorlog)
+						if buildtask['method'] == 'buildArch':
+							add_build_to_db(build, tag, buildtask, errorlog)
 
 try:
 	(server, limit) = parse_args()
