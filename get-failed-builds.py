@@ -8,16 +8,9 @@ License: GPLv2+
 """
 
 import argparse
-import koji
-import json
-import re
-import rpm
-import sqlite3
 
 from progress.bar import Bar
-
-def jprint(sth):
-	print( json.dumps(sth, indent=4) )
+from common import *
 
 def parse_args():
 	parser = argparse.ArgumentParser(description="Query Koji for FTBFS list")
@@ -45,83 +38,33 @@ def parse_args():
 
 	return (server, options.limit)
 
-def get_list_of_failed_builds(server, limit):
-	return session.listBuilds(state=koji.BUILD_STATES['FAILED'], queryOpts={'limit':limit, 'order':'-build_id'})
 
-def add_build_to_db(build, tag, buildtask, errorlog):
-	cur.execute("""
-				INSERT INTO nvrs
-				(build_id, package_name, nvr, arch, tag, owner_name, task_id, creation_time, epoch, version, release, state, rootlog)
-				VALUES
-				(?,        ?,            ?,   ?,    ?,   ?,          ?,       ?,             ?,     ?,       ?,       ?,     ?)
-				""",
-				(
-					build['build_id'], build['package_name'], build['nvr'], buildtask['arch'], tag, buildtask['owner_name'],
-					buildtask['id'], buildtask['create_time'], build['epoch'], build['version'],
-					build['release'], buildtask['state'], errorlog
-				)
-			   )
-	conn.commit()
+def list_ftbfs(limit):
 
-def list_ftbfs(server, limit):
-
-	builds = get_list_of_failed_builds(server, limit)
+	builds = hrwkoji.get_list_of_failed_builds(limit)
 
 	failed_packages = {}
 
 	bar = Bar('Fetching', max=limit)
+
 	for build in builds:
-		# check for newer
-		tag=build['release'].split('.')[-1].replace('c','')
-		current_package = "{package_name}-{tag}".format(package_name=build['package_name'], tag=tag)
+		current_package = "{package_name}-{tag}".format(package_name=build['package_name'], tag=extract_tag(build['release']))
 
 		bar.next()
 		if not failed_packages.get(current_package, False):
 			failed_packages[current_package] = 1
-			newer_exists = False
-			
-			try:
-				package_builds = session.listTagged(tag, package=build['package_name'], latest=True)
-
-				for package in package_builds:
-					if 1 == rpm.labelCompare(('1', package['version'], package['release']), ('1', build['version'], build['release'])):
-						newer_exists = True
-			except koji.GenericError:
-				pass	# no idea why koji fails for listTagged() on packages which never built
-
-			if not newer_exists:
-				buildarch_tasks = session.listTasks(opts={'parent':build['task_id'], 'method':'buildArch'})
-
-				for buildtask in buildarch_tasks:
-
-					exists_already = cur.execute("SELECT nvr FROM nvrs WHERE task_id = ?", [buildtask['id']]).fetchall()
-
-					if 0 == len(exists_already):
-						errorlog = ''
-
-						if 'root.log' in session.listTaskOutput( buildtask['id']):
-							rootlog = session.downloadTaskOutput(buildtask['id'], 'root.log')
-
-							if 'Requires:' in rootlog:
-
-								start = rootlog.find('Error:')
-								errorlog = re.sub("DEBUG util.py:...:", "", rootlog[start:rootlog.find('Child return code was', start)])
+			hrw_koji.handle_build(build)
 
 
-						add_build_to_db(build, tag, buildtask, errorlog)
 
 try:
 	(server, limit) = parse_args()
 
-	session = koji.ClientSession(server + '/kojihub')
+	hrw_koji = hrw_koji_helper(server)
 
-	conn = sqlite3.connect('cache.db')
-	cur  = conn.cursor()
-
-	list_ftbfs(server, limit)
+	list_ftbfs(limit)
 
 except KeyboardInterrupt:
-	print("\n")
+	pass
 
-
-conn.close();
+print("\n")
