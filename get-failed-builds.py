@@ -14,6 +14,7 @@ import re
 import rpm
 import sqlite3
 
+from progress.bar import Bar
 
 def jprint(sth):
 	print( json.dumps(sth, indent=4) )
@@ -68,21 +69,21 @@ def list_ftbfs(server, limit):
 
 	failed_packages = {}
 
+	bar = Bar('Fetching', max=limit)
 	for build in builds:
 		# check for newer
 		tag=build['release'].split('.')[-1].replace('c','')
 		current_package = "{package_name}-{tag}".format(package_name=build['package_name'], tag=tag)
 
+		bar.next()
 		if not failed_packages.get(current_package, False):
 			failed_packages[current_package] = 1
-	#        print("Checking package: %s" % (build['nvr']))
 			newer_exists = False
 			
 			try:
 				package_builds = session.listTagged(tag, package=build['package_name'], latest=True)
 
 				for package in package_builds:
-	#                print("\tfound version %s" % package['nvr'])
 					if 1 == rpm.labelCompare(('1', package['version'], package['release']), ('1', build['version'], build['release'])):
 						newer_exists = True
 			except koji.GenericError:
@@ -92,7 +93,6 @@ def list_ftbfs(server, limit):
 				buildarch_tasks = session.listTasks(opts={'parent':build['task_id'], 'method':'buildArch'})
 
 				for buildtask in buildarch_tasks:
-					package_failed_reason = ''
 
 					exists_already = cur.execute("SELECT nvr FROM nvrs WHERE task_id = ?", [buildtask['id']]).fetchall()
 
@@ -103,12 +103,10 @@ def list_ftbfs(server, limit):
 							rootlog = session.downloadTaskOutput(buildtask['id'], 'root.log')
 
 							if 'Requires:' in rootlog:
-								package_failed_reason = ' (missing build dependencies)'
 
 								start = rootlog.find('Error:')
 								errorlog = re.sub("DEBUG util.py:...:", "", rootlog[start:rootlog.find('Child return code was', start)])
 
-						print("Package failed%s: %s %s/koji/taskinfo?taskID=%d" % (package_failed_reason, build['nvr'], server, buildtask['id']))
 
 						add_build_to_db(build, tag, buildtask, errorlog)
 
