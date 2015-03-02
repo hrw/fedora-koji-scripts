@@ -103,7 +103,8 @@ def list_ftbfs(server, limit):
 							if 'Requires:' in rootlog:
 								package_failed_reason = ' (missing build dependencies)'
 
-								errorlog = re.sub("DEBUG util.py:...:", "", rootlog[rootlog.find('Error:'):rootlog.find('Child return code was')])
+								start = rootlog.find('Error:')
+								errorlog = re.sub("DEBUG util.py:...:", "", rootlog[start:rootlog.find('Child return code was', start)])
 
 						print("Package failed%s: %s %s/koji/taskinfo?taskID=%d" % (package_failed_reason, build['nvr'], server, buildtask['id']))
 
