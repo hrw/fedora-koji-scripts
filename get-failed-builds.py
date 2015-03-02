@@ -89,7 +89,7 @@ def list_ftbfs(server, limit):
 				pass	# no idea why koji fails for listTagged() on packages which never built
 
 			if not newer_exists:
-				buildarch_tasks = session.listTasks(opts={'parent':build['task_id']})
+				buildarch_tasks = session.listTasks(opts={'parent':build['task_id'], 'method':'buildArch'})
 
 				for buildtask in buildarch_tasks:
 					package_failed_reason = ''
@@ -110,8 +110,7 @@ def list_ftbfs(server, limit):
 
 						print("Package failed%s: %s %s/koji/taskinfo?taskID=%d" % (package_failed_reason, build['nvr'], server, buildtask['id']))
 
-						if buildtask['method'] == 'buildArch':
-							add_build_to_db(build, tag, buildtask, errorlog)
+						add_build_to_db(build, tag, buildtask, errorlog)
 
 try:
 	(server, limit) = parse_args()
