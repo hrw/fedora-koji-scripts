@@ -94,7 +94,9 @@ def list_ftbfs(server, limit):
 				for buildtask in buildarch_tasks:
 					package_failed_reason = ''
 
-					if not cur.execute("SELECT nvr FROM nvrs WHERE build_id = ?", [build['build_id']]):
+					exists_already = cur.execute("SELECT nvr FROM nvrs WHERE task_id = ?", [buildtask['id']]).fetchall()
+
+					if 0 == len(exists_already):
 						errorlog = ''
 
 						if 'root.log' in session.listTaskOutput( buildtask['id']):
