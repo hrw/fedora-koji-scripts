@@ -178,6 +178,28 @@ def source_name_for(binary_name):
 
 
 SONAME_DEP_RE = re.compile(r'\.so\.\d')
+RISCV_ARCH_RE = re.compile(r'riscv-?64')
+
+
+def dep_query_variants(dep):
+    """Dep string variants to query, in order.
+
+    Besides the dep as-is, arch-qualified deps (MPI builds, e.g.
+    'foo.so.1()(64bit)(mpich-riscv64)') are re-tried with the qualifier
+    rewritten to the host arch and with the qualifier dropped.
+    """
+    variants = [dep]
+    if RISCV_ARCH_RE.search(dep):
+        basearch = dnf.conf.Conf().basearch
+        for qual in {basearch, basearch.replace('_', '-')}:
+            variants.append(RISCV_ARCH_RE.sub(qual, dep))
+        variants.append(re.sub(r'\)\([^()]*\)$', ')', dep))
+
+    unique = []
+    for variant in variants:
+        if variant not in unique:
+            unique.append(variant)
+    return unique
 
 
 def _provides_query(pattern):
@@ -191,17 +213,20 @@ def _provides_query(pattern):
 def provider_for_dep(dep):
     """Return name(s) of packages providing a soname dep, or None.
 
-    Resolved against the host's dnf repos, so this only knows libraries
-    shipped in regular Fedora for the host arch; MPI-qualified and
-    third-party (e.g. rpmfusion) sonames are left unresolved.
+    Resolved against the host's Fedora repos only; sonames not shipped
+    there (third-party, retired or older than the host release) are left
+    unresolved.
     """
     if not SONAME_DEP_RE.search(dep):
         return None
     try:
-        names = _provides_query(dep)
+        for variant in dep_query_variants(dep):
+            names = _provides_query(variant)
+            if names:
+                return ', '.join(names)
     except Exception:
         return None
-    return ', '.join(names) if names else None
+    return None
 
 
 def resolve_null_mappings():
