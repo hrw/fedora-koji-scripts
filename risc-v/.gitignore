@@ -1,0 +1,6 @@
+# runtime data and generated reports
+__pycache__/
+koji-cache-*.yml
+repoclosure-*.log
+repoclosure-*-summary.txt
+repoclosure-*.html
