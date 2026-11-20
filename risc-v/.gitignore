@@ -1,6 +1,7 @@
 # runtime data and generated reports
 __pycache__/
 koji-cache-*.yml
+dep-providers.yml
 repoclosure-*.log
 repoclosure-*-summary.txt
 repoclosure-*.html
