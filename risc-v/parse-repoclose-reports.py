@@ -202,12 +202,43 @@ def dep_query_variants(dep):
     return unique
 
 
+# digit runs in soname names, used to normalize versions away
+SONAME_NORM_RE = re.compile(r'[0-9._]+')
+
+
+def provider_by_stem_glob(base, dep):
+    """Identify the owning package of an outdated soname via a glob.
+
+    Matches provides that differ from the dep only in version digits,
+    e.g. libavcodec.so.62 vs the libavcodec.so.63 shipped by
+    libavcodec-free; other libraries with a similar prefix (libraw vs
+    libraw1394) are ignored.
+    """
+    import libdnf5
+    left = dep.split('(', 1)[0].partition('.so.')[0]
+    wanted = SONAME_NORM_RE.sub('#', left)
+    pattern = SONAME_NORM_RE.sub('*', left) + '*'
+
+    query = libdnf5.rpm.PackageQuery(base)
+    query.filter_provides(pattern, libdnf5.common.QueryCmp_GLOB)
+
+    names = set()
+    for pkg in query:
+        for reldep in pkg.get_provides():
+            name = str(reldep).split('(', 1)[0].partition('.so.')[0]
+            if SONAME_NORM_RE.sub('#', name) == wanted:
+                names.add(pkg.get_name())
+                break
+    return ', '.join(sorted(names)) if names else None
+
+
 def resolve_providers(deps):
     """Resolve soname deps to providing package names, in bulk.
 
     Returns {dep: "provider[, provider]" or None}. Exact matches (with
     MPI/arch qualifiers rewritten for the host arch) go through a single
-    bulk libdnf5 query, bucketed per dep in python.
+    bulk libdnf5 query; sonames older than the host release ships fall
+    back to a stem glob.
     """
     import libdnf5
 
@@ -227,6 +258,7 @@ def resolve_providers(deps):
         exact_pkgs = [(pkg.get_name(), {str(r) for r in pkg.get_provides()})
                       for pkg in query]
 
+        glob_todo = []
         for dep in soname_deps:
             for variant in dep_query_variants(dep):
                 names = sorted({name for name, provides in exact_pkgs
@@ -234,6 +266,12 @@ def resolve_providers(deps):
                 if names:
                     result[dep] = ', '.join(names)
                     break
+            else:
+                glob_todo.append(dep)
+
+        # tier 2: stem glob for outdated sonames
+        for dep in glob_todo:
+            result[dep] = provider_by_stem_glob(base, dep)
 
     return result
 
