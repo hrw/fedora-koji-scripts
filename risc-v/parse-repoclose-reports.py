@@ -66,7 +66,7 @@ from html import escape
 from urllib.parse import urlencode
 
 import koji
-import dnf
+import libdnf5
 import yaml
 
 
@@ -130,26 +130,13 @@ def save_pkg_name_map():
                   allow_unicode=True)
 
 
-_repo_sack = None
 _libdnf5_base = None
-
-
-def get_repo_sack():
-    """Lazily build a dnf sack with all available repos loaded."""
-    global _repo_sack
-    if _repo_sack is None:
-        base = dnf.Base()
-        base.read_all_repos()
-        base.fill_sack(load_system_repo=False, load_available_repos=True)
-        _repo_sack = base.sack
-    return _repo_sack
 
 
 def get_libdnf5_base():
     """Lazily build a libdnf5 base with the host's repos loaded."""
     global _libdnf5_base
     if _libdnf5_base is None:
-        import libdnf5
         base = libdnf5.base.Base()
         base.load_config()
         base.setup()
@@ -162,10 +149,12 @@ def get_libdnf5_base():
 
 def source_name_for(binary_name):
     """Return the source package name for a binary package, or None."""
-    pkgs = list(get_repo_sack().query().filter(name=binary_name).latest())
-    if not pkgs:
-        return None
-    return pkgs[0].source_name
+    query = libdnf5.rpm.PackageQuery(get_libdnf5_base())
+    query.filter_name(binary_name)
+    query.filter_latest_evr(1)
+    for pkg in query:
+        return pkg.get_source_name()
+    return None
 
 
 SONAME_DEP_RE = re.compile(r'\.so\.\d')
@@ -181,7 +170,7 @@ def dep_query_variants(dep):
     """
     variants = [dep]
     if RISCV_ARCH_RE.search(dep):
-        basearch = dnf.conf.Conf().basearch
+        basearch = libdnf5.rpm.get_base_arch(os.uname().machine)
         for qual in {basearch, basearch.replace('_', '-')}:
             variants.append(RISCV_ARCH_RE.sub(qual, dep))
         variants.append(re.sub(r'\)\([^()]*\)$', ')', dep))
@@ -226,7 +215,6 @@ def provider_by_stem_glob(base, dep):
     libavcodec-free; other libraries with a similar prefix (libraw vs
     libraw1394) are ignored.
     """
-    import libdnf5
     left = dep.split('(', 1)[0].partition('.so.')[0]
     wanted = SONAME_NORM_RE.sub('#', left)
     pattern = SONAME_NORM_RE.sub('*', left) + '*'
@@ -253,8 +241,6 @@ def resolve_providers(deps):
     back to a stem glob. Results - misses included - are cached in
     dep-providers.yml, as each glob query costs ~0.5s.
     """
-    import libdnf5
-
     load_dep_providers()
     soname_deps = sorted(d for d in deps if SONAME_DEP_RE.search(d))
     result = {}
@@ -306,7 +292,7 @@ def resolve_providers(deps):
 
 
 def resolve_null_mappings():
-    """Resolve null binary->source mappings using dnf repos."""
+    """Resolve null binary->source mappings using host repos."""
     nulls = [k for k, v in pkg_name_map.items() if v is None]
     if not nulls:
         return
@@ -326,7 +312,6 @@ def resolve_null_mappings():
 
 def parse_nevr(nvr):
     """Parse an NVR string into a libdnf5 Nevra, or None."""
-    import libdnf5
     forms = libdnf5.rpm.VectorNevraForm()
     forms.append(libdnf5.rpm.Nevra.Form_NEVR)
     for parsed in libdnf5.rpm.Nevra().parse(nvr, forms):
@@ -336,7 +321,6 @@ def parse_nevr(nvr):
 
 def nvr_is_lower(nvr_a, nvr_b):
     """Return True if nvr_a is an older version than nvr_b."""
-    import libdnf5
     na = parse_nevr(nvr_a)
     nb = parse_nevr(nvr_b)
     if na is None or nb is None:
