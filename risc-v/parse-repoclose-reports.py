@@ -1,11 +1,14 @@
 #!/usr/bin/python3
 
 '''
-Command to get logs:
+Command to get logs (or just run ./run-repoclosure.sh <tag>):
 
 dnf repoclosure --refresh --forcearch=riscv64 --nogpgcheck --arch=riscv64 \
 --repo=fedora-riscv \
---repofrompath=fedora-riscv,https://riscv-koji.fedoraproject.org/repos/f43-build/latest/riscv64/
+--repofrompath=fedora-riscv,https://riscv-koji.fedoraproject.org/repos/f45-build/latest/riscv64/
+
+The log and its stderr summary are read from repoclosure-<tag>.log and
+repoclosure-<tag>-summary.txt (that is what run-repoclosure.sh writes).
 
 we need lists of:
 
@@ -13,7 +16,7 @@ we need lists of:
 - most common unresolved_deps
 - whatever came out of it
 
-Some might be removed, and thus needs removal on our end. Some of these require
+Some Might be removed, and thus needs removal on our end. Some of these require
 new dependencies or something we cannot build anymore, and get stuck. It those
 cases probably untagged them would be a better option. Some of these are in
 general problem for Fedora.
@@ -54,10 +57,11 @@ Packages older than Fedora 41:
 
 '''
 import argparse
+import os
 import re
 import sys
 from datetime import datetime, timezone
-from pprint import pprint
+from urllib.parse import urlencode
 
 import koji
 import dnf
@@ -82,7 +86,13 @@ RISCV_KOJI_WEB = 'https://riscv-koji.fedoraproject.org/koji'
 KOJI_TAG = args.tag
 KOJI_CACHE_FILE = f'koji-cache-{KOJI_TAG}.yml'
 PKG_NAME_MAP_FILE = 'map-package-names.yml'
-SUMMARY_FILE = 'repoclosure-summary.txt'
+
+
+LOG_FILE = f'repoclosure-{KOJI_TAG}.log'
+SUMMARY_FILE = f'repoclosure-{KOJI_TAG}-summary.txt'
+
+# how many packages to stuff into one koji multicall batch
+KOJI_MULTICALL_CHUNK = 25
 
 koji_cache = {}
 pkg_name_map = {}
@@ -118,6 +128,7 @@ def save_pkg_name_map():
 
 
 _repo_sack = None
+_cmp_sack = None
 
 
 def get_repo_sack():
@@ -129,6 +140,16 @@ def get_repo_sack():
         base.fill_sack(load_system_repo=False, load_available_repos=True)
         _repo_sack = base.sack
     return _repo_sack
+
+
+def get_cmp_sack():
+    """Lazily build an empty dnf sack for NEVRA comparisons."""
+    global _cmp_sack
+    if _cmp_sack is None:
+        base = dnf.Base()
+        base.fill_sack(load_system_repo=False)
+        _cmp_sack = base.sack
+    return _cmp_sack
 
 
 def source_name_for(binary_name):
@@ -162,7 +183,7 @@ def nvr_is_lower(nvr_a, nvr_b):
     """Return True if nvr_a is an older version than nvr_b."""
     na = dnf.subject.Subject(nvr_a).get_nevra_possibilities()[0]
     nb = dnf.subject.Subject(nvr_b).get_nevra_possibilities()[0]
-    return na.evr_cmp(nb, _dnf_sack) < 0
+    return na.evr_cmp(nb, get_cmp_sack()) < 0
 
 
 def binary_name_from_nvra(nvra):
@@ -174,7 +195,7 @@ def binary_name_from_nvra(nvra):
         subject = dnf.subject.Subject(nvra)
         parsed = subject.get_nevra_possibilities()[0]
         return parsed.name
-    except KeyError:
+    except (KeyError, IndexError):
         return nvra.rsplit('-', 2)[0]
 
 
@@ -188,46 +209,16 @@ def pkg_name_from_nvra(nvra):
     return guessed
 
 
-def get_koji_info(session, pkg_name, tag):
-    """Get latest failed build and latest successful build in tag."""
-    pkg_info = session.getPackage(pkg_name)
-
-    # Latest non-complete build (failed, building, canceled)
-    fc_suffix = '.fc' + tag.lstrip('f')
-    latest_failure = None
-    if pkg_info:
-        all_builds = session.listBuilds(packageID=pkg_info['id'])
-        non_complete = [b for b in all_builds
-                        if b['state'] != 1 and fc_suffix in b['nvr']]
-        if non_complete:
-            latest_failure = sorted(non_complete,
-                                    key=lambda x: x['build_id'],
-                                    reverse=True)[0]
-
-    # Latest successful build in the tag
-    latest_success = None
-    tagged_builds = session.listTagged(tag, package=pkg_name)
-    if tagged_builds:
-        complete = [b for b in tagged_builds if b['state'] == 1]
-        if complete:
-            latest_success = sorted(complete,
-                                    key=lambda x: x['build_id'],
-                                    reverse=True)[0]
-
-    if not latest_failure and not latest_success:
-        return None, None
-
-    return latest_failure, latest_success
+def empty_entry():
+    """A koji cache entry for a package we have no build data for."""
+    return {k: {'attempt': None, 'success': None}
+            for k in ('fedora', 'riscv')}
 
 
-def format_build(build):
-    """Format a build dict into a display string."""
-    if not build:
-        return "no builds found"
-    state = koji.BUILD_STATES[build['state']]
-    ts = build.get('completion_ts') or build.get('creation_ts')
-    date = datetime.fromtimestamp(ts).strftime('%Y-%m-%d') if ts else '?'
-    return f"{build['nvr']}  {state}  {date}"
+def entry_has_data(entry):
+    return any(entry[k][f] is not None
+               for k in ('fedora', 'riscv')
+               for f in ('attempt', 'success'))
 
 
 def build_to_cache_entry(build):
@@ -238,61 +229,191 @@ def build_to_cache_entry(build):
     return {'nvr': build['nvr'], 'state': state}
 
 
-def fetch_koji_info(pkg_name):
-    """Fetch Koji info for a package and store in cache."""
-    entry = {}
+_sessions = None
 
-    for label, session in [("fedora", fedora_session),
-                           ("riscv", riscv_session)]:
-        attempt, success = get_koji_info(session, pkg_name, KOJI_TAG)
-        entry[label] = {
-            'attempt': build_to_cache_entry(attempt),
-            'success': build_to_cache_entry(success),
+
+def get_sessions():
+    """Lazily create koji client sessions."""
+    global _sessions
+    if _sessions is None:
+        _sessions = {
+            'fedora': koji.ClientSession(FEDORA_KOJI),
+            'riscv': koji.ClientSession(RISCV_KOJI),
         }
+    return _sessions
 
-    has_data = any(entry[k][f] is not None
-                   for k in ('fedora', 'riscv')
-                   for f in ('attempt', 'success'))
-    if not has_data:
-        source_name = source_name_for(pkg_name)
-        if source_name and source_name != pkg_name:
+
+def _unwrap_multicall(result):
+    """Unwrap a koji multicall result entry (single-element list or fault)."""
+    if isinstance(result, list) and len(result) == 1:
+        return result[0]
+    if isinstance(result, dict) and 'faultCode' in result:
+        return None
+    return result
+
+
+def _bulk_get_koji_info_chunk(session, pkg_names, tag):
+    """get_koji_info() for a batch of packages via one koji multicall.
+
+    Returns {pkg_name: (latest_failure, latest_success)}.
+    """
+    fc_suffix = '.fc' + tag.lstrip('f')
+    results = {name: (None, None) for name in pkg_names}
+
+    # round 1: which of the packages exist on this koji instance at all
+    session.multicall = True
+    for name in pkg_names:
+        session.getPackage(name)
+    infos = session.multiCall()
+
+    pkg_ids = {}
+    for name, info in zip(pkg_names, infos):
+        info = _unwrap_multicall(info)
+        if info:
+            pkg_ids[name] = info['id']
+
+    # round 2: all builds + builds tagged into our tag
+    if pkg_ids:
+        session.multicall = True
+        for name, pkg_id in pkg_ids.items():
+            session.listBuilds(packageID=pkg_id)
+            session.listTagged(tag, package=name)
+        builds = session.multiCall()
+
+        names = list(pkg_ids)
+        for i, name in enumerate(names):
+            all_builds = _unwrap_multicall(builds[2 * i]) or []
+            tagged_builds = _unwrap_multicall(builds[2 * i + 1]) or []
+
+            # latest non-complete build (failed, building, canceled)
+            non_complete = [b for b in all_builds
+                            if b['state'] != 1 and fc_suffix in b['nvr']]
+            latest_failure = max(non_complete, key=lambda b: b['build_id'],
+                                 default=None)
+
+            # latest successful build in the tag
+            complete = [b for b in tagged_builds if b['state'] == 1]
+            latest_success = max(complete, key=lambda b: b['build_id'],
+                                 default=None)
+
+            results[name] = (latest_failure, latest_success)
+
+    return results
+
+
+def bulk_get_koji_info(session, pkg_names, tag):
+    """Fetch latest failed/successful builds for many packages in bulk."""
+    results = {}
+    for start in range(0, len(pkg_names), KOJI_MULTICALL_CHUNK):
+        chunk = pkg_names[start:start + KOJI_MULTICALL_CHUNK]
+        results.update(_bulk_get_koji_info_chunk(session, chunk, tag))
+        if verbose:
+            print(f"  {session.baseurl}: fetched "
+                  f"{min(start + KOJI_MULTICALL_CHUNK, len(pkg_names))}/"
+                  f"{len(pkg_names)}")
+    return results
+
+
+def fetch_entries_bulk(names):
+    """Fetch koji data for all names; returns {name: cache entry}.
+
+    Every requested name gets an entry (possibly empty); entries with any
+    build data are stored in koji_cache.
+    """
+    per_instance = {}
+    for label, session in get_sessions().items():
+        per_instance[label] = bulk_get_koji_info(session, names, KOJI_TAG)
+
+    entries = {}
+    for name in names:
+        entry = {}
+        for label in per_instance:
+            attempt, success = per_instance[label][name]
+            entry[label] = {
+                'attempt': build_to_cache_entry(attempt),
+                'success': build_to_cache_entry(success),
+            }
+        entries[name] = entry
+        if entry_has_data(entry):
+            koji_cache[name] = entry
+
+    save_koji_cache()
+    return entries
+
+
+def collect_entries(pkg_names):
+    """Return {pkg_name: koji cache entry} for all given package names.
+
+    Serves what it can from koji_cache; the rest is fetched from koji in
+    bulk. Packages with no data under their own name are retried under
+    their source package name, like the old per-package fetch did.
+    """
+    entries = {}
+    todo = []
+
+    for name in sorted(pkg_names):
+        if name in koji_cache:
+            entries[name] = koji_cache[name]
+        elif name in pkg_name_map and pkg_name_map[name] is None:
+            # known to have no koji data; do not query the servers again
+            entries[name] = empty_entry()
+        else:
+            todo.append(name)
+
+    if not todo:
+        return entries
+
+    print(f"Fetching koji info for {len(todo)} packages...")
+    fetched = fetch_entries_bulk(todo)
+    entries.update(fetched)
+
+    # no data under the binary name? retry under the source package name
+    retries = {}
+    for name in todo:
+        if entry_has_data(fetched[name]):
+            continue
+        source_name = source_name_for(name)
+        if source_name and source_name != name:
             if verbose:
-                print(f"  no Koji data for '{pkg_name}', "
+                print(f"  no Koji data for '{name}', "
                       f"retrying as '{source_name}'")
-            for label, session in [("fedora", fedora_session),
-                                   ("riscv", riscv_session)]:
-                attempt, success = get_koji_info(session, source_name,
-                                                 KOJI_TAG)
-                entry[label] = {
-                    'attempt': build_to_cache_entry(attempt),
-                    'success': build_to_cache_entry(success),
-                }
-            has_data = any(entry[k][f] is not None
-                           for k in ('fedora', 'riscv')
-                           for f in ('attempt', 'success'))
-            if has_data:
-                pkg_name_map[pkg_name] = source_name
-                save_pkg_name_map()
-    if not has_data:
-        if pkg_name not in pkg_name_map:
-            pkg_name_map[pkg_name] = None
-            save_pkg_name_map()
-            print(f"WARNING: no Koji data for '{pkg_name}' "
-                  f"— add mapping to {PKG_NAME_MAP_FILE}",
-                  file=sys.stderr)
-    else:
-        koji_cache[pkg_name] = entry
+            retries[name] = source_name
+
+    map_updated = False
+    if retries:
+        refetched = fetch_entries_bulk(sorted(set(retries.values())))
+        for name, source_name in retries.items():
+            entry = refetched.get(source_name)
+            if entry and entry_has_data(entry):
+                entries[name] = entry
+                koji_cache[name] = entry
+                pkg_name_map[name] = source_name
+                map_updated = True
         save_koji_cache()
 
-    return entry
+    # remember packages with no data at all, so we do not hammer koji with
+    # them on every run; remove the null entry from the map to retry
+    for name in todo:
+        if not entry_has_data(entries[name]):
+            if name not in pkg_name_map:
+                pkg_name_map[name] = None
+                map_updated = True
+                print(f"WARNING: no Koji data for '{name}' "
+                      f"— add mapping to {PKG_NAME_MAP_FILE} (or remove "
+                      f"the null entry to retry on the next run)",
+                      file=sys.stderr)
+
+    if map_updated:
+        save_pkg_name_map()
+
+    return entries
 
 
-def print_koji_info(pkg_name):
-    """Print Koji build info for a package, using cache."""
-    if pkg_name in koji_cache:
-        entry = koji_cache[pkg_name]
-    else:
-        entry = fetch_koji_info(pkg_name)
+def print_koji_info(pkg_name, entries):
+    """Print Koji build info for a package, from pre-fetched entries."""
+    entry = entries.get(pkg_name)
+    if not entry:
+        return
 
     for label, key in [("Fedora", "fedora"), ("RISC-V", "riscv")]:
         data = entry[key]
@@ -319,42 +440,65 @@ def print_koji_info(pkg_name):
                 print("\t\tLast success: none")
 
 
-def show_older_than(packages, fedora_release):
-    print(f"Packages older than Fedora {fedora_release}:\n")
-    for pkg in packages:
-        try:
-            fedora_version = int(pkg.split('fc')[1].split('.')[0])
-        except ValueError:
-            fedora_version = int(pkg.split('fc')[1].split('~')[0])
-        except IndexError:
-            print(f"IndexError: {pkg}")
-
-        if fedora_version < fedora_release:
-            print(f"- {pkg}")
-
-    print("")
+PACKAGE_RE = re.compile(r'^package:\s+(\S+)')
+DEP_RE = re.compile(r'^    (.+?)\s*$')
 
 
-def show_unresolved_deps(deps):
-    sorted_deps = {}
+def parse_repoclosure_log(log_file):
+    """Parse repoclosure output.
 
-    for pkg in deps:
-        amount = len(deps[pkg])
-        if amount not in sorted_deps:
-            sorted_deps[amount] = []
+    Returns ({nvra: [unresolved deps]}, {dep: [nvras]}).
+    """
+    packages = {}
+    unresolved_deps = {}
+    current = None
 
-        sorted_deps[amount].append(pkg)
+    with open(log_file) as log:
+        for line in log:
+            m = PACKAGE_RE.match(line)
+            if m:
+                current = m.group(1)
+                packages.setdefault(current, [])
+                continue
 
-    for i in sorted(sorted_deps, reverse=True):
-        for dep_name in sorted(sorted_deps[i]):
-            print(f"{dep_name} ({i}):")
+            m = DEP_RE.match(line)
+            if m:
+                if current is None:
+                    print(f"WARNING: dep without a package header: "
+                          f"{m.group(1)!r}", file=sys.stderr)
+                    continue
+                udep = m.group(1)
+                packages[current].append(udep)
+                unresolved_deps.setdefault(udep, []).append(current)
 
-            for pkg in deps[dep_name]:
-                pkg_name = pkg_name_from_nvra(pkg)
-                print(f"    {pkg}")
-                print_koji_info(pkg_name)
+    return packages, unresolved_deps
 
-            print()
+
+def group_deps_by_count(deps):
+    """Group {dep: [nvras]} into [(count, dep, [nvras])].
+
+    Most-hit deps first, then alphabetically.
+    """
+    by_count = {}
+    for dep, nvras in deps.items():
+        by_count.setdefault(len(nvras), []).append(dep)
+
+    grouped = []
+    for count in sorted(by_count, reverse=True):
+        for dep in sorted(by_count[count]):
+            grouped.append((count, dep, deps[dep]))
+    return grouped
+
+
+def show_unresolved_deps(grouped, entries):
+    for count, dep_name, nvras in grouped:
+        print(f"{dep_name} ({count}):")
+
+        for nvra in nvras:
+            print(f"    {nvra}")
+            print_koji_info(pkg_name_from_nvra(nvra), entries)
+
+        print()
 
 
 def vr_from_nvr(nvr):
@@ -368,7 +512,8 @@ def vr_from_nvr(nvr):
 def nvr_to_link(nvr, koji_web):
     """Turn an NVR into an HTML link to its Koji build page."""
     vr = vr_from_nvr(nvr)
-    url = f"{koji_web}/search?match=exact&amp;type=build&amp;terms={nvr}"
+    query = urlencode({'match': 'exact', 'type': 'build', 'terms': nvr})
+    url = f'{koji_web}/search?{query}'.replace('&', '&amp;')
     return f'<a href="{url}">{vr}</a>'
 
 
@@ -394,15 +539,7 @@ def load_summary():
     return None, None
 
 
-def generate_html(deps):
-    sorted_deps = {}
-
-    for pkg in deps:
-        amount = len(deps[pkg])
-        if amount not in sorted_deps:
-            sorted_deps[amount] = []
-        sorted_deps[amount].append(pkg)
-
+def generate_html(deps, entries):
     unresolved, pkg_count = load_summary()
 
     html = []
@@ -497,78 +634,64 @@ td.dash { color: #c9d1d9; text-align: center; }
     html.append('</thead>')
     html.append('<tbody>')
 
-    for i in sorted(sorted_deps, reverse=True):
-        for dep_name in sorted(sorted_deps[i]):
-            html.append(f'<tr><td colspan="5" class="dep-header">'
-                        f'{dep_name} ({i})</td></tr>')
+    for count, dep_name, nvras in group_deps_by_count(deps):
+        html.append(f'<tr><td colspan="5" class="dep-header">'
+                    f'{dep_name} ({count})</td></tr>')
 
-            seen_pkg_names = set()
-            pkg_names_ordered = []
-            for pkg in deps[dep_name]:
-                pkg_name = pkg_name_from_nvra(pkg)
-                if pkg_name not in seen_pkg_names:
-                    seen_pkg_names.add(pkg_name)
-                    pkg_names_ordered.append(pkg_name)
+        pkg_names = sorted({pkg_name_from_nvra(nvra) for nvra in nvras})
 
-            for row_idx, pkg_name in enumerate(sorted(pkg_names_ordered)):
-                if pkg_name not in koji_cache:
-                    fetch_koji_info(pkg_name)
+        row_idx = 0
+        for pkg_name in pkg_names:
+            entry = entries.get(pkg_name)
+            if entry is None or not entry_has_data(entry):
+                continue
 
-                if pkg_name not in koji_cache:
-                    continue
+            cls = ' class="zebra"' if row_idx % 2 else ''
+            row_idx += 1
+            pkg_url = f'https://src.fedoraproject.org/rpms/{pkg_name}'
+            html.append(f'<tr{cls}><td>'
+                        f'<a href="{pkg_url}">{pkg_name}</a></td>')
 
-                entry = koji_cache[pkg_name]
-                has_any = any(entry[k][f] is not None
-                              for k in ('fedora', 'riscv')
-                              for f in ('attempt', 'success'))
-                if not has_any:
-                    continue
+            for key, koji_web in [
+                ("riscv", RISCV_KOJI_WEB),
+                ("fedora", FEDORA_KOJI_WEB),
+            ]:
+                data = entry[key]
+                attempt = data['attempt']
+                success = data['success']
 
-                cls = ' class="zebra"' if row_idx % 2 else ''
-                pkg_url = f'https://src.fedoraproject.org/rpms/{pkg_name}'
-                html.append(f'<tr{cls}><td>'
-                            f'<a href="{pkg_url}">{pkg_name}</a></td>')
+                if attempt is None and success is None:
+                    html.append('<td class="dash">-</td>'
+                                '<td class="dash">-</td>')
+                elif attempt is None:
+                    link = nvr_to_link(success['nvr'],
+                                       koji_web)
+                    html.append('<td class="dash">-</td>')
+                    html.append(
+                        f'<td class="complete">'
+                        f'{link}</td>')
+                elif (success
+                      and attempt['nvr'] == success['nvr']):
+                    link = nvr_to_link(attempt['nvr'],
+                                       koji_web)
+                    html.append('<td class="dash">-</td>')
+                    html.append(
+                        f'<td class="complete">'
+                        f'{link}</td>')
+                elif (success
+                      and nvr_is_lower(attempt['nvr'],
+                                       success['nvr'])):
+                    link = nvr_to_link(success['nvr'],
+                                       koji_web)
+                    html.append('<td class="dash">-</td>')
+                    html.append(
+                        f'<td class="complete">'
+                        f'{link}</td>')
+                else:
+                    html.append(koji_cell(attempt, koji_web))
+                    html.append(koji_cell(success, koji_web))
 
-                for key, koji_web in [
-                    ("riscv", RISCV_KOJI_WEB),
-                    ("fedora", FEDORA_KOJI_WEB),
-                ]:
-                    data = entry[key]
-                    attempt = data['attempt']
-                    success = data['success']
-
-                    if attempt is None and success is None:
-                        html.append('<td class="dash">-</td>'
-                                    '<td class="dash">-</td>')
-                    elif attempt is None:
-                        link = nvr_to_link(success['nvr'],
-                                           koji_web)
-                        html.append('<td class="dash">-</td>')
-                        html.append(
-                            f'<td class="complete">'
-                            f'{link}</td>')
-                    elif (success
-                          and attempt['nvr'] == success['nvr']):
-                        link = nvr_to_link(attempt['nvr'],
-                                           koji_web)
-                        html.append('<td class="dash">-</td>')
-                        html.append(
-                            f'<td class="complete">'
-                            f'{link}</td>')
-                    elif (success
-                          and nvr_is_lower(attempt['nvr'],
-                                           success['nvr'])):
-                        link = nvr_to_link(success['nvr'],
-                                           koji_web)
-                        html.append('<td class="dash">-</td>')
-                        html.append(
-                            f'<td class="complete">'
-                            f'{link}</td>')
-                    else:
-                        html.append(koji_cell(attempt, koji_web))
-                        html.append(koji_cell(success, koji_web))
-
-                html.append('</tr>')
+            html.append('</tr>')
 
     html.append('</tbody>')
     html.append('</table>')
@@ -583,55 +706,44 @@ td.dash { color: #c9d1d9; text-align: center; }
         print(f"\nGenerated {outfile}")
 
 
-_dnf_base = dnf.Base()
-_dnf_base.fill_sack(load_system_repo=False)
-_dnf_sack = _dnf_base.sack
+def main():
+    if args.force:
+        try:
+            os.remove(KOJI_CACHE_FILE)
+        except FileNotFoundError:
+            pass
 
-if args.force:
-    import os
-    try:
-        os.remove(KOJI_CACHE_FILE)
-    except FileNotFoundError:
-        pass
+    if not os.path.exists(LOG_FILE):
+        sys.exit(f"repoclosure log '{LOG_FILE}' not found — "
+                 f"run ./run-repoclosure.sh {KOJI_TAG} first")
 
-load_koji_cache()
-load_pkg_name_map()
+    load_koji_cache()
+    load_pkg_name_map()
 
-# Populate name map with cached entries that have no builds
-map_updated = False
-for pkg_name, entry in koji_cache.items():
-    if (entry['fedora']['attempt'] is None
-            and entry['riscv']['attempt'] is None
-            and pkg_name not in pkg_name_map):
-        pkg_name_map[pkg_name] = None
-        map_updated = True
-if map_updated:
-    save_pkg_name_map()
+    # Populate name map with cached entries that have no builds
+    map_updated = False
+    for pkg_name, entry in koji_cache.items():
+        if not entry_has_data(entry) and pkg_name not in pkg_name_map:
+            pkg_name_map[pkg_name] = None
+            map_updated = True
+    if map_updated:
+        save_pkg_name_map()
 
-resolve_null_mappings()
+    resolve_null_mappings()
 
-fedora_session = koji.ClientSession(FEDORA_KOJI)
-riscv_session = koji.ClientSession(RISCV_KOJI)
+    packages, unresolved_deps = parse_repoclosure_log(LOG_FILE)
+    grouped = group_deps_by_count(unresolved_deps)
 
-packages = {}
-unresolved_deps = {}
+    names = {pkg_name_from_nvra(nvra)
+             for _, _, nvras in grouped
+             for nvra in nvras}
+    entries = collect_entries(names)
 
-with open("repoclosure.log", "r") as log:
-    for line in log.readlines():
-        if line.startswith("package:"):
-            package_name = line.split(" ")[1]
-            packages[package_name] = []
-        elif line.startswith("    "):
-            udep = line.strip()
-            packages[package_name].append(udep)
-            if udep not in unresolved_deps:
-                unresolved_deps[udep] = []
-            unresolved_deps[udep].append(package_name)
+    if verbose:
+        show_unresolved_deps(grouped, entries)
 
-# pprint(packages)
-# pprint(unresolved_deps)
+    generate_html(unresolved_deps, entries)
 
-if verbose:
-    show_unresolved_deps(unresolved_deps)
 
-generate_html(unresolved_deps)
+if __name__ == '__main__':
+    main()
