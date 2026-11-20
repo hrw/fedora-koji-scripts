@@ -202,31 +202,40 @@ def dep_query_variants(dep):
     return unique
 
 
-def _provides_query(pattern):
-    """Query names of packages providing a dep string, via libdnf5."""
-    import libdnf5
-    query = libdnf5.rpm.PackageQuery(get_libdnf5_base())
-    query.filter_provides(pattern)
-    return sorted({pkg.get_name() for pkg in query})
+def resolve_providers(deps):
+    """Resolve soname deps to providing package names, in bulk.
 
-
-def provider_for_dep(dep):
-    """Return name(s) of packages providing a soname dep, or None.
-
-    Resolved against the host's Fedora repos only; sonames not shipped
-    there (third-party, retired or older than the host release) are left
-    unresolved.
+    Returns {dep: "provider[, provider]" or None}. Exact matches (with
+    MPI/arch qualifiers rewritten for the host arch) go through a single
+    bulk libdnf5 query, bucketed per dep in python.
     """
-    if not SONAME_DEP_RE.search(dep):
-        return None
-    try:
-        for variant in dep_query_variants(dep):
-            names = _provides_query(variant)
-            if names:
-                return ', '.join(names)
-    except Exception:
-        return None
-    return None
+    import libdnf5
+
+    soname_deps = sorted(d for d in deps if SONAME_DEP_RE.search(d))
+    result = {}
+
+    if soname_deps:
+        base = get_libdnf5_base()
+
+        variant_map = {}
+        for dep in soname_deps:
+            for variant in dep_query_variants(dep):
+                variant_map.setdefault(variant, []).append(dep)
+
+        query = libdnf5.rpm.PackageQuery(base)
+        query.filter_provides(list(variant_map))
+        exact_pkgs = [(pkg.get_name(), {str(r) for r in pkg.get_provides()})
+                      for pkg in query]
+
+        for dep in soname_deps:
+            for variant in dep_query_variants(dep):
+                names = sorted({name for name, provides in exact_pkgs
+                                if variant in provides})
+                if names:
+                    result[dep] = ', '.join(names)
+                    break
+
+    return result
 
 
 def resolve_null_mappings():
@@ -559,9 +568,9 @@ def group_deps_by_count(deps):
     return grouped
 
 
-def show_unresolved_deps(grouped, entries):
+def show_unresolved_deps(grouped, entries, providers):
     for count, dep_name, nvras in grouped:
-        provider = provider_for_dep(dep_name)
+        provider = providers.get(dep_name)
         suffix = f' - {provider}' if provider else ''
         print(f"{dep_name} ({count}){suffix}:")
 
@@ -610,7 +619,7 @@ def load_summary():
     return None, None
 
 
-def generate_html(deps, entries):
+def generate_html(deps, entries, providers):
     unresolved, pkg_count = load_summary()
 
     html = []
@@ -707,7 +716,7 @@ td.dash { color: #c9d1d9; text-align: center; }
     html.append('<tbody>')
 
     for count, dep_name, nvras in group_deps_by_count(deps):
-        provider = provider_for_dep(dep_name)
+        provider = providers.get(dep_name)
         suffix = (f' <span class="dep-provider">- {escape(provider)}</span>'
                   if provider else '')
         html.append(f'<tr><td colspan="5" class="dep-header">'
@@ -813,11 +822,12 @@ def main():
              for _, _, nvras in grouped
              for nvra in nvras}
     entries = collect_entries(names)
+    providers = resolve_providers(unresolved_deps)
 
     if verbose:
-        show_unresolved_deps(grouped, entries)
+        show_unresolved_deps(grouped, entries, providers)
 
-    generate_html(unresolved_deps, entries)
+    generate_html(unresolved_deps, entries, providers)
 
 
 if __name__ == '__main__':
