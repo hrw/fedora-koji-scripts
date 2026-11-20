@@ -131,7 +131,6 @@ def save_pkg_name_map():
 
 
 _repo_sack = None
-_cmp_sack = None
 _libdnf5_base = None
 
 
@@ -159,16 +158,6 @@ def get_libdnf5_base():
         repo_sack.load_repos()
         _libdnf5_base = base
     return _libdnf5_base
-
-
-def get_cmp_sack():
-    """Lazily build an empty dnf sack for NEVRA comparisons."""
-    global _cmp_sack
-    if _cmp_sack is None:
-        base = dnf.Base()
-        base.fill_sack(load_system_repo=False)
-        _cmp_sack = base.sack
-    return _cmp_sack
 
 
 def source_name_for(binary_name):
@@ -335,11 +324,31 @@ def resolve_null_mappings():
         save_pkg_name_map()
 
 
+def parse_nevr(nvr):
+    """Parse an NVR string into a libdnf5 Nevra, or None."""
+    import libdnf5
+    forms = libdnf5.rpm.VectorNevraForm()
+    forms.append(libdnf5.rpm.Nevra.Form_NEVR)
+    for parsed in libdnf5.rpm.Nevra().parse(nvr, forms):
+        return parsed
+    return None
+
+
 def nvr_is_lower(nvr_a, nvr_b):
     """Return True if nvr_a is an older version than nvr_b."""
-    na = dnf.subject.Subject(nvr_a).get_nevra_possibilities()[0]
-    nb = dnf.subject.Subject(nvr_b).get_nevra_possibilities()[0]
-    return na.evr_cmp(nb, get_cmp_sack()) < 0
+    import libdnf5
+    na = parse_nevr(nvr_a)
+    nb = parse_nevr(nvr_b)
+    if na is None or nb is None:
+        return False
+    ea = int(na.get_epoch() or 0)
+    eb = int(nb.get_epoch() or 0)
+    if ea != eb:
+        return ea < eb
+    cmp_version = libdnf5.rpm.rpmvercmp(na.get_version(), nb.get_version())
+    if cmp_version:
+        return cmp_version < 0
+    return libdnf5.rpm.rpmvercmp(na.get_release(), nb.get_release()) < 0
 
 
 def binary_name_from_nvra(nvra):
@@ -347,12 +356,8 @@ def binary_name_from_nvra(nvra):
     nvra = re.sub(r'\.(riscv64|x86_64|aarch64|noarch|i686|s390x|ppc64le)$',
                   '', nvra)
     nvra = re.sub(r'\.riscv64\.fc', '.fc', nvra)
-    try:
-        subject = dnf.subject.Subject(nvra)
-        parsed = subject.get_nevra_possibilities()[0]
-        return parsed.name
-    except (KeyError, IndexError):
-        return nvra.rsplit('-', 2)[0]
+    parsed = parse_nevr(nvra)
+    return parsed.get_name() if parsed else nvra.rsplit('-', 2)[0]
 
 
 def pkg_name_from_nvra(nvra):
