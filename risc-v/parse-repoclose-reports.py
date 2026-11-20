@@ -188,6 +188,9 @@ SONAME_NORM_RE = re.compile(r'[0-9._]+')
 # soname -> package mappings move slowly; cache resolves for two weeks
 DEP_PROVIDERS_TTL = 14 * 24 * 3600
 
+# bumped whenever the cached provider semantics change
+DEP_PROVIDERS_FORMAT = 2
+
 _dep_providers_cache = None
 
 
@@ -208,12 +211,12 @@ def save_dep_providers():
 
 
 def provider_by_stem_glob(base, dep):
-    """Identify the owning package of an outdated soname via a glob.
+    """Identify the owning source package of an outdated soname via a glob.
 
     Matches provides that differ from the dep only in version digits,
     e.g. libavcodec.so.62 vs the libavcodec.so.63 shipped by
-    libavcodec-free; other libraries with a similar prefix (libraw vs
-    libraw1394) are ignored.
+    libavcodec-free (source: ffmpeg); other libraries with a similar
+    prefix (libraw vs libraw1394) are ignored.
     """
     left = dep.split('(', 1)[0].partition('.so.')[0]
     wanted = SONAME_NORM_RE.sub('#', left)
@@ -227,15 +230,15 @@ def provider_by_stem_glob(base, dep):
         for reldep in pkg.get_provides():
             name = str(reldep).split('(', 1)[0].partition('.so.')[0]
             if SONAME_NORM_RE.sub('#', name) == wanted:
-                names.add(pkg.get_name())
+                names.add(pkg.get_source_name() or pkg.get_name())
                 break
     return ', '.join(sorted(names)) if names else None
 
 
 def resolve_providers(deps):
-    """Resolve soname deps to providing package names, bulk + cached.
+    """Resolve soname deps to providing source package names, bulk + cached.
 
-    Returns {dep: "provider[, provider]" or None}. Exact matches (with
+    Returns {dep: "source[, source]" or None}. Exact matches (with
     MPI/arch qualifiers rewritten for the host arch) go through a single
     bulk libdnf5 query; sonames older than the host release ships fall
     back to a stem glob. Results - misses included - are cached in
@@ -249,7 +252,8 @@ def resolve_providers(deps):
 
     for dep in soname_deps:
         entry = _dep_providers_cache.get(dep)
-        if entry and now - entry.get('ts', 0) < DEP_PROVIDERS_TTL:
+        if (entry and entry.get('fmt') == DEP_PROVIDERS_FORMAT
+                and now - entry.get('ts', 0) < DEP_PROVIDERS_TTL):
             result[dep] = entry.get('providers')
         else:
             todo.append(dep)
@@ -265,7 +269,8 @@ def resolve_providers(deps):
 
         query = libdnf5.rpm.PackageQuery(base)
         query.filter_provides(list(variant_map))
-        exact_pkgs = [(pkg.get_name(), {str(r) for r in pkg.get_provides()})
+        exact_pkgs = [(pkg.get_source_name() or pkg.get_name(),
+                       {str(r) for r in pkg.get_provides()})
                       for pkg in query]
 
         glob_todo = []
@@ -285,7 +290,8 @@ def resolve_providers(deps):
 
         for dep in todo:
             _dep_providers_cache[dep] = {'providers': result[dep],
-                                         'ts': int(now)}
+                                         'ts': int(now),
+                                         'fmt': DEP_PROVIDERS_FORMAT}
         save_dep_providers()
 
     return result
@@ -673,6 +679,15 @@ def koji_cell(build, koji_web):
     return f'<td class="{state_class}">{link}</td>'
 
 
+def provider_links(provider):
+    """Render provider names as links to their src.fedoraproject.org pages."""
+    links = []
+    for name in provider.split(', '):
+        url = f'https://src.fedoraproject.org/rpms/{name}'
+        links.append(f'<a href="{url}">{escape(name)}</a>')
+    return ', '.join(links)
+
+
 def load_summary():
     """Load repoclosure summary from stderr output."""
     try:
@@ -750,6 +765,8 @@ td a:hover { text-decoration: underline; }
     color: #1f2328;
 }
 .dep-provider { color: #656d76; font-weight: 400; font-size: 0.85em; }
+.dep-provider a { color: inherit; text-decoration: none; }
+.dep-provider a:hover { text-decoration: underline; }
 .zebra { background: #f6f8fa; }
 td.dash { color: #c9d1d9; text-align: center; }
     ''')
@@ -784,7 +801,8 @@ td.dash { color: #c9d1d9; text-align: center; }
 
     for count, dep_name, nvras in group_deps_by_count(deps):
         provider = providers.get(dep_name)
-        suffix = (f' <span class="dep-provider">- {escape(provider)}</span>'
+        suffix = (f' <span class="dep-provider">- '
+                  f'{provider_links(provider)}</span>'
                   if provider else '')
         html.append(f'<tr><td colspan="5" class="dep-header">'
                     f'{escape(dep_name)} ({count}){suffix}</td></tr>')
