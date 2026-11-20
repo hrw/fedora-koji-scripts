@@ -60,6 +60,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from html import escape
 from urllib.parse import urlencode
@@ -87,6 +88,7 @@ RISCV_KOJI_WEB = 'https://riscv-koji.fedoraproject.org/koji'
 KOJI_TAG = args.tag
 KOJI_CACHE_FILE = f'koji-cache-{KOJI_TAG}.yml'
 PKG_NAME_MAP_FILE = 'map-package-names.yml'
+DEP_PROVIDERS_FILE = 'dep-providers.yml'
 
 
 LOG_FILE = f'repoclosure-{KOJI_TAG}.log'
@@ -205,6 +207,27 @@ def dep_query_variants(dep):
 # digit runs in soname names, used to normalize versions away
 SONAME_NORM_RE = re.compile(r'[0-9._]+')
 
+# soname -> package mappings move slowly; cache resolves for two weeks
+DEP_PROVIDERS_TTL = 14 * 24 * 3600
+
+_dep_providers_cache = None
+
+
+def load_dep_providers():
+    global _dep_providers_cache
+    if _dep_providers_cache is None:
+        try:
+            with open(DEP_PROVIDERS_FILE) as f:
+                _dep_providers_cache = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            _dep_providers_cache = {}
+
+
+def save_dep_providers():
+    with open(DEP_PROVIDERS_FILE, 'w') as f:
+        yaml.dump(_dep_providers_cache, f, default_flow_style=False,
+                  allow_unicode=True)
+
 
 def provider_by_stem_glob(base, dep):
     """Identify the owning package of an outdated soname via a glob.
@@ -233,23 +256,35 @@ def provider_by_stem_glob(base, dep):
 
 
 def resolve_providers(deps):
-    """Resolve soname deps to providing package names, in bulk.
+    """Resolve soname deps to providing package names, bulk + cached.
 
     Returns {dep: "provider[, provider]" or None}. Exact matches (with
     MPI/arch qualifiers rewritten for the host arch) go through a single
     bulk libdnf5 query; sonames older than the host release ships fall
-    back to a stem glob.
+    back to a stem glob. Results - misses included - are cached in
+    dep-providers.yml, as each glob query costs ~0.5s.
     """
     import libdnf5
 
+    load_dep_providers()
     soname_deps = sorted(d for d in deps if SONAME_DEP_RE.search(d))
     result = {}
+    todo = []
+    now = time.time()
 
-    if soname_deps:
+    for dep in soname_deps:
+        entry = _dep_providers_cache.get(dep)
+        if entry and now - entry.get('ts', 0) < DEP_PROVIDERS_TTL:
+            result[dep] = entry.get('providers')
+        else:
+            todo.append(dep)
+
+    if todo:
         base = get_libdnf5_base()
 
+        # tier 1: exact provides, arch-qualifier variants included, bulk
         variant_map = {}
-        for dep in soname_deps:
+        for dep in todo:
             for variant in dep_query_variants(dep):
                 variant_map.setdefault(variant, []).append(dep)
 
@@ -259,7 +294,7 @@ def resolve_providers(deps):
                       for pkg in query]
 
         glob_todo = []
-        for dep in soname_deps:
+        for dep in todo:
             for variant in dep_query_variants(dep):
                 names = sorted({name for name, provides in exact_pkgs
                                 if variant in provides})
@@ -272,6 +307,11 @@ def resolve_providers(deps):
         # tier 2: stem glob for outdated sonames
         for dep in glob_todo:
             result[dep] = provider_by_stem_glob(base, dep)
+
+        for dep in todo:
+            _dep_providers_cache[dep] = {'providers': result[dep],
+                                         'ts': int(now)}
+        save_dep_providers()
 
     return result
 
@@ -830,10 +870,11 @@ td.dash { color: #c9d1d9; text-align: center; }
 
 def main():
     if args.force:
-        try:
-            os.remove(KOJI_CACHE_FILE)
-        except FileNotFoundError:
-            pass
+        for cache_file in (KOJI_CACHE_FILE, DEP_PROVIDERS_FILE):
+            try:
+                os.remove(cache_file)
+            except FileNotFoundError:
+                pass
 
     if not os.path.exists(LOG_FILE):
         sys.exit(f"repoclosure log '{LOG_FILE}' not found — "
