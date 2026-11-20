@@ -61,6 +61,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from html import escape
 from urllib.parse import urlencode
 
 import koji
@@ -158,6 +159,26 @@ def source_name_for(binary_name):
     if not pkgs:
         return None
     return pkgs[0].source_name
+
+
+SONAME_DEP_RE = re.compile(r'\.so\.\d')
+
+
+def provider_for_dep(dep):
+    """Return name(s) of packages providing a soname dep, or None.
+
+    Resolved against the host's dnf repos, so this only knows libraries
+    shipped in regular Fedora for the host arch; MPI-qualified and
+    third-party (e.g. rpmfusion) sonames are left unresolved.
+    """
+    if not SONAME_DEP_RE.search(dep):
+        return None
+    try:
+        pkgs = get_repo_sack().query().filter(provides=dep).latest()
+        names = sorted({p.name for p in pkgs})
+    except Exception:
+        return None
+    return ', '.join(names) if names else None
 
 
 def resolve_null_mappings():
@@ -492,7 +513,9 @@ def group_deps_by_count(deps):
 
 def show_unresolved_deps(grouped, entries):
     for count, dep_name, nvras in grouped:
-        print(f"{dep_name} ({count}):")
+        provider = provider_for_dep(dep_name)
+        suffix = f' - {provider}' if provider else ''
+        print(f"{dep_name} ({count}){suffix}:")
 
         for nvra in nvras:
             print(f"    {nvra}")
@@ -602,6 +625,7 @@ td a:hover { text-decoration: underline; }
     border-top: 2px solid #d1d9e0;
     color: #1f2328;
 }
+.dep-provider { color: #656d76; font-weight: 400; font-size: 0.85em; }
 .zebra { background: #f6f8fa; }
 td.dash { color: #c9d1d9; text-align: center; }
     ''')
@@ -635,8 +659,11 @@ td.dash { color: #c9d1d9; text-align: center; }
     html.append('<tbody>')
 
     for count, dep_name, nvras in group_deps_by_count(deps):
+        provider = provider_for_dep(dep_name)
+        suffix = (f' <span class="dep-provider">- {escape(provider)}</span>'
+                  if provider else '')
         html.append(f'<tr><td colspan="5" class="dep-header">'
-                    f'{dep_name} ({count})</td></tr>')
+                    f'{escape(dep_name)} ({count}){suffix}</td></tr>')
 
         pkg_names = sorted({pkg_name_from_nvra(nvra) for nvra in nvras})
 
