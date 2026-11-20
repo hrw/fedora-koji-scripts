@@ -130,6 +130,7 @@ def save_pkg_name_map():
 
 _repo_sack = None
 _cmp_sack = None
+_libdnf5_base = None
 
 
 def get_repo_sack():
@@ -141,6 +142,21 @@ def get_repo_sack():
         base.fill_sack(load_system_repo=False, load_available_repos=True)
         _repo_sack = base.sack
     return _repo_sack
+
+
+def get_libdnf5_base():
+    """Lazily build a libdnf5 base with the host's repos loaded."""
+    global _libdnf5_base
+    if _libdnf5_base is None:
+        import libdnf5
+        base = libdnf5.base.Base()
+        base.load_config()
+        base.setup()
+        repo_sack = base.get_repo_sack()
+        repo_sack.create_repos_from_system_configuration()
+        repo_sack.load_repos()
+        _libdnf5_base = base
+    return _libdnf5_base
 
 
 def get_cmp_sack():
@@ -164,6 +180,14 @@ def source_name_for(binary_name):
 SONAME_DEP_RE = re.compile(r'\.so\.\d')
 
 
+def _provides_query(pattern):
+    """Query names of packages providing a dep string, via libdnf5."""
+    import libdnf5
+    query = libdnf5.rpm.PackageQuery(get_libdnf5_base())
+    query.filter_provides(pattern)
+    return sorted({pkg.get_name() for pkg in query})
+
+
 def provider_for_dep(dep):
     """Return name(s) of packages providing a soname dep, or None.
 
@@ -174,8 +198,7 @@ def provider_for_dep(dep):
     if not SONAME_DEP_RE.search(dep):
         return None
     try:
-        pkgs = get_repo_sack().query().filter(provides=dep).latest()
-        names = sorted({p.name for p in pkgs})
+        names = _provides_query(dep)
     except Exception:
         return None
     return ', '.join(names) if names else None
