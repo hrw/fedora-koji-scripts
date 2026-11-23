@@ -670,13 +670,13 @@ def nvr_to_link(nvr, koji_web):
     return f'<a href="{url}">{vr}</a>'
 
 
-def koji_cell(build, koji_web):
+def koji_cell(build, koji_web, suffix=''):
     """Render a single koji build as a table cell."""
     if not build:
         return '<td class="dash">-</td>'
     link = nvr_to_link(build['nvr'], koji_web)
     state_class = build['state'].lower()
-    return f'<td class="{state_class}">{link}</td>'
+    return f'<td class="{state_class}">{link}{suffix}</td>'
 
 
 def provider_links(provider):
@@ -768,6 +768,7 @@ td a:hover { text-decoration: underline; }
 .dep-provider a { color: inherit; text-decoration: none; }
 .dep-provider a:hover { text-decoration: underline; }
 .zebra { background: #f6f8fa; }
+.stale-note { color: #bf8700; font-size: 0.8em; }
 td.dash { color: #c9d1d9; text-align: center; }
     ''')
     html.append('</style>')
@@ -815,6 +816,14 @@ td.dash { color: #c9d1d9; text-align: center; }
             if entry is None or not entry_has_data(entry):
                 continue
 
+            riscv_success = entry['riscv']['success']
+            fedora_success = entry['fedora']['success']
+            behind = (riscv_success and fedora_success
+                      and nvr_is_lower(riscv_success['nvr'],
+                                       fedora_success['nvr']))
+            stale_note = (' <span class="stale-note">(not up-to-date)</span>'
+                          if behind else '')
+
             cls = ' class="zebra"' if row_idx % 2 else ''
             row_idx += 1
             pkg_url = f'https://src.fedoraproject.org/rpms/{pkg_name}'
@@ -828,37 +837,29 @@ td.dash { color: #c9d1d9; text-align: center; }
                 data = entry[key]
                 attempt = data['attempt']
                 success = data['success']
+                note = stale_note if key == "riscv" else ''
 
                 if attempt is None and success is None:
                     html.append('<td class="dash">-</td>'
                                 '<td class="dash">-</td>')
                 elif attempt is None:
-                    link = nvr_to_link(success['nvr'],
-                                       koji_web)
+                    link = nvr_to_link(success['nvr'], koji_web)
                     html.append('<td class="dash">-</td>')
-                    html.append(
-                        f'<td class="complete">'
-                        f'{link}</td>')
+                    html.append(f'<td class="complete">{link}{note}</td>')
                 elif (success
                       and attempt['nvr'] == success['nvr']):
-                    link = nvr_to_link(attempt['nvr'],
-                                       koji_web)
+                    link = nvr_to_link(attempt['nvr'], koji_web)
                     html.append('<td class="dash">-</td>')
-                    html.append(
-                        f'<td class="complete">'
-                        f'{link}</td>')
+                    html.append(f'<td class="complete">{link}{note}</td>')
                 elif (success
                       and nvr_is_lower(attempt['nvr'],
                                        success['nvr'])):
-                    link = nvr_to_link(success['nvr'],
-                                       koji_web)
+                    link = nvr_to_link(success['nvr'], koji_web)
                     html.append('<td class="dash">-</td>')
-                    html.append(
-                        f'<td class="complete">'
-                        f'{link}</td>')
+                    html.append(f'<td class="complete">{link}{note}</td>')
                 else:
                     html.append(koji_cell(attempt, koji_web))
-                    html.append(koji_cell(success, koji_web))
+                    html.append(koji_cell(success, koji_web, note))
 
             html.append('</tr>')
 
