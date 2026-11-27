@@ -923,8 +923,8 @@ td.dash { color: #c9d1d9; text-align: center; }
                 '<th colspan="2">RISC-V</th>'
                 '<th colspan="2">Fedora</th></tr>')
     html.append('<tr><th></th>'
-                '<th>last failure</th><th>success</th>'
-                '<th>last failure</th><th>success</th></tr>')
+                '<th>last attempt</th><th>success</th>'
+                '<th>last attempt</th><th>success</th></tr>')
     html.append('</thead>')
     html.append('<tbody>')
 
