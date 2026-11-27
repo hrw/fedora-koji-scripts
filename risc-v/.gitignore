@@ -2,6 +2,7 @@
 __pycache__/
 koji-cache-*.yml
 dep-providers.yml
+maintainers-cache.yml
 repoclosure-*.log
 repoclosure-*-summary.txt
 repoclosure-*.html

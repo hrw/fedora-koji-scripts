@@ -57,13 +57,16 @@ Packages older than Fedora 41:
 
 '''
 import argparse
+import json
 import os
 import re
 import sys
 import time
 from datetime import datetime, timezone
 from html import escape
-from urllib.parse import urlencode
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode
+from urllib.request import urlopen
 
 import koji
 import libdnf5
@@ -89,6 +92,7 @@ KOJI_TAG = args.tag
 KOJI_CACHE_FILE = f'koji-cache-{KOJI_TAG}.yml'
 PKG_NAME_MAP_FILE = 'map-package-names.yml'
 DEP_PROVIDERS_FILE = 'dep-providers.yml'
+MAINTAINERS_CACHE_FILE = 'maintainers-cache.yml'
 
 
 LOG_FILE = f'repoclosure-{KOJI_TAG}.log'
@@ -295,6 +299,128 @@ def resolve_providers(deps):
         save_dep_providers()
 
     return result
+
+
+# dist-git API URL for package ACLs
+DISTGIT_API = 'https://src.fedoraproject.org/api/0/rpms/{}'
+
+# users to flag next to package names, besides the 'orphan' owner
+FLAGGED_MAINTAINERS = ('kkofler',)
+
+# dist-git access roles that count as maintaining a package
+MAINTAINER_ROLES = ('owner', 'admin', 'commit', 'collaborator')
+
+# maintainer lists move slowly; cache them for a day
+MAINTAINERS_TTL = 24 * 3600
+
+# bumped whenever the cached maintainer semantics change
+MAINTAINERS_FORMAT = 1
+
+_maintainers_cache = None
+
+
+def load_maintainers_cache():
+    global _maintainers_cache
+    if _maintainers_cache is None:
+        try:
+            with open(MAINTAINERS_CACHE_FILE) as f:
+                _maintainers_cache = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            _maintainers_cache = {}
+
+
+def save_maintainers_cache():
+    with open(MAINTAINERS_CACHE_FILE, 'w') as f:
+        yaml.dump(_maintainers_cache, f, default_flow_style=False)
+
+
+def fetch_maintainers(name):
+    """Fetch users with write access to a package's dist-git repo."""
+    url = DISTGIT_API.format(quote(name))
+    with urlopen(url, timeout=30) as resp:
+        data = json.load(resp)
+    users = set()
+    for role, role_users in data.get('access_users', {}).items():
+        if role in MAINTAINER_ROLES:
+            users.update(role_users)
+    return sorted(users)
+
+
+def _maintainers_fetch_failed(name, err, result):
+    """Serve stale cache data (if any) when a dist-git fetch fails."""
+    entry = _maintainers_cache.get(name)
+    if entry:
+        result[name] = entry.get('users') or []
+        print(f"WARNING: keeping cached maintainers for '{name}' "
+              f"({err})", file=sys.stderr)
+    else:
+        result[name] = []
+        print(f"WARNING: no maintainer data for '{name}' ({err})",
+              file=sys.stderr)
+
+
+def collect_maintainers(names):
+    """Return {name: [maintainers]} for all names, cached for a day.
+
+    Feeds the '(orphaned)' and FLAGGED_MAINTAINERS markers. A missing
+    dist-git repo counts as an empty list; other fetch errors fall back
+    to stale cache data.
+    """
+    load_maintainers_cache()
+    now = time.time()
+    result = {}
+    todo = []
+
+    for name in sorted(names):
+        entry = _maintainers_cache.get(name)
+        if (entry and entry.get('fmt') == MAINTAINERS_FORMAT
+                and now - entry.get('ts', 0) < MAINTAINERS_TTL):
+            result[name] = entry.get('users') or []
+        else:
+            todo.append(name)
+
+    if not todo:
+        return result
+
+    print(f"Fetching dist-git maintainers for {len(todo)} packages...")
+    for name in todo:
+        try:
+            users = fetch_maintainers(name)
+        except HTTPError as err:
+            if err.code != 404:
+                _maintainers_fetch_failed(name, err, result)
+                continue
+            users = []      # no dist-git repo under this name
+        except Exception as err:
+            _maintainers_fetch_failed(name, err, result)
+            continue
+
+        if verbose:
+            print(f"  {name}: {', '.join(users) or '-'}")
+        result[name] = users
+        _maintainers_cache[name] = {'users': users, 'ts': int(now),
+                                    'fmt': MAINTAINERS_FORMAT}
+    save_maintainers_cache()
+
+    return result
+
+
+def maintainer_notes(name, maintainers):
+    """Marker notes for a package name, e.g. ['orphaned', 'kkofler']."""
+    users = maintainers.get(name) or ()
+    notes = []
+    if 'orphan' in users:
+        notes.append('orphaned')
+    for user in FLAGGED_MAINTAINERS:
+        if user in users:
+            notes.append(user)
+    return notes
+
+
+def notes_html(name, maintainers):
+    """Render package name markers, e.g. ' (orphaned)', as HTML."""
+    return ''.join(f' <span class="pkg-note">({note})</span>'
+                   for note in maintainer_notes(name, maintainers))
 
 
 def resolve_null_mappings():
@@ -679,12 +805,13 @@ def koji_cell(build, koji_web, suffix=''):
     return f'<td class="{state_class}">{link}{suffix}</td>'
 
 
-def provider_links(provider):
+def provider_links(provider, maintainers):
     """Render provider names as links to their src.fedoraproject.org pages."""
     links = []
     for name in provider.split(', '):
         url = f'https://src.fedoraproject.org/rpms/{name}'
-        links.append(f'<a href="{url}">{escape(name)}</a>')
+        links.append(f'<a href="{url}">{escape(name)}</a>'
+                     f'{notes_html(name, maintainers)}')
     return ', '.join(links)
 
 
@@ -769,6 +896,7 @@ td a:hover { text-decoration: underline; }
 .dep-provider a:hover { text-decoration: underline; }
 .zebra { background: #f6f8fa; }
 .stale-note { color: #bf8700; font-size: 0.8em; }
+.pkg-note { color: #656d76; font-size: 0.8em; }
 td.dash { color: #c9d1d9; text-align: center; }
     ''')
     html.append('</style>')
@@ -800,10 +928,25 @@ td.dash { color: #c9d1d9; text-align: center; }
     html.append('</thead>')
     html.append('<tbody>')
 
-    for count, dep_name, nvras in group_deps_by_count(deps):
+    grouped = group_deps_by_count(deps)
+
+    # names shown in the table: package rows and dep providers
+    shown = set()
+    for _, dep_name, nvras in grouped:
+        provider = providers.get(dep_name)
+        if provider:
+            shown.update(provider.split(', '))
+        for nvra in nvras:
+            name = pkg_name_from_nvra(nvra)
+            entry = entries.get(name)
+            if entry is not None and entry_has_data(entry):
+                shown.add(name)
+    maintainers = collect_maintainers(shown)
+
+    for count, dep_name, nvras in grouped:
         provider = providers.get(dep_name)
         suffix = (f' <span class="dep-provider">- '
-                  f'{provider_links(provider)}</span>'
+                  f'{provider_links(provider, maintainers)}</span>'
                   if provider else '')
         html.append(f'<tr><td colspan="5" class="dep-header">'
                     f'{escape(dep_name)} ({count}){suffix}</td></tr>')
@@ -828,7 +971,8 @@ td.dash { color: #c9d1d9; text-align: center; }
             row_idx += 1
             pkg_url = f'https://src.fedoraproject.org/rpms/{pkg_name}'
             html.append(f'<tr{cls}><td>'
-                        f'<a href="{pkg_url}">{pkg_name}</a></td>')
+                        f'<a href="{pkg_url}">{pkg_name}</a>'
+                        f'{notes_html(pkg_name, maintainers)}</td>')
 
             for key, koji_web in [
                 ("riscv", RISCV_KOJI_WEB),
@@ -878,7 +1022,8 @@ td.dash { color: #c9d1d9; text-align: center; }
 
 def main():
     if args.force:
-        for cache_file in (KOJI_CACHE_FILE, DEP_PROVIDERS_FILE):
+        for cache_file in (KOJI_CACHE_FILE, DEP_PROVIDERS_FILE,
+                           MAINTAINERS_CACHE_FILE):
             try:
                 os.remove(cache_file)
             except FileNotFoundError:
