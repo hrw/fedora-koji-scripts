@@ -708,7 +708,7 @@ def generate_html(deps, entries, providers):
     html.append('<!DOCTYPE html>')
     html.append('<html><head>')
     html.append('<meta charset="utf-8">')
-    html.append('<title>Repoclosure Report</title>')
+    html.append(f'<title>Repoclosure report for {KOJI_TAG}</title>')
     html.append('<style>')
     html.append('''
 html, body {
